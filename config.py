@@ -7,13 +7,44 @@ key and a ``[garmin]`` / ``[ai]`` section key are accepted.
 from __future__ import annotations
 
 import os
+import pathlib
+import tomllib
+from collections.abc import Mapping
 
-try:  # available when running under Streamlit
-    import streamlit as st
 
-    _secrets = st.secrets
-except Exception:  # noqa: BLE001 - any import/runtime issue means "no secrets"
-    _secrets = {}
+def _deep_dict(v):
+    """Recursively turn any Mapping (e.g. Streamlit's Secrets) into plain dicts."""
+    if isinstance(v, Mapping):
+        return {k: _deep_dict(v[k]) for k in v.keys()}
+    return v
+
+
+def _load_secrets() -> dict:
+    """Read secrets whether we run under ``streamlit run`` or as a plain script.
+
+    Under Streamlit, ``st.secrets`` is authoritative. From a bare CLI (sync.py),
+    parse ``.streamlit/secrets.toml`` directly with the stdlib TOML reader.
+    """
+    try:
+        import streamlit as st
+
+        if len(st.secrets):  # raises if no secrets file — caught below
+            return _deep_dict(st.secrets)
+    except Exception:  # noqa: BLE001
+        pass
+    for p in (
+        pathlib.Path(".streamlit/secrets.toml"),
+        pathlib.Path.home() / ".streamlit" / "secrets.toml",
+    ):
+        try:
+            if p.is_file():
+                return tomllib.loads(p.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            pass
+    return {}
+
+
+_secrets = _load_secrets()
 
 
 def _get(key: str, default: str | None = None) -> str | None:
@@ -21,9 +52,10 @@ def _get(key: str, default: str | None = None) -> str | None:
         if key in _secrets:
             return str(_secrets[key])
         for section in ("garmin", "ai"):
-            if section in _secrets and key in _secrets[section]:
-                return str(_secrets[section][key])
-    except Exception:  # noqa: BLE001 - missing secrets file raises on access
+            sec = _secrets.get(section)
+            if isinstance(sec, Mapping) and key in sec:
+                return str(sec[key])
+    except Exception:  # noqa: BLE001
         pass
     return os.environ.get(key, default)
 

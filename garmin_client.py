@@ -24,6 +24,12 @@ import config
 log = logging.getLogger(__name__)
 SEC_PER_HOUR = 3600.0
 
+# Garmin's numeric trainingStatus enum -> readable label.
+_TRAINING_STATUS = {
+    0: "none", 1: "detraining", 2: "unproductive", 3: "maintaining",
+    4: "productive", 5: "recovery", 6: "overreaching", 7: "peaking", 8: "strained",
+}
+
 
 def _safe(fn, *args, **kwargs):
     """Call a Garmin endpoint; return None on shape/parse failures.
@@ -108,6 +114,35 @@ class GarminData:
         self._ensure_display_name()
         self._persist_tokens()
 
+    def connect_interactive(self, ask=input) -> None:
+        """Connect from a terminal: resume a cached session, else prompt.
+
+        ``ask`` is the input function (overridable in tests). Prompts for the
+        e-mail only if it isn't in config/secrets, for the password only if a
+        fresh login is actually needed, and for an MFA code only if Garmin asks.
+        """
+        if self.try_resume():
+            return
+        email = self.email or ask("Garmin e-mail: ").strip()
+        password = self.password
+        if not password:
+            try:
+                from getpass import getpass
+
+                password = getpass("Garmin password: ")
+            except Exception:  # noqa: BLE001 - no tty
+                password = ask("Garmin password: ")
+        api = Garmin(
+            email=email,
+            password=password,
+            prompt_mfa=lambda: ask("Enter the MFA code Garmin e-mailed you: ").strip(),
+        )
+        api.login(self.tokenstore)  # loads if present (ignored on first run), then dumps
+        self._api = api
+        self.email, self.password = email, password
+        self._ensure_display_name()
+        self._persist_tokens()
+
     def _ensure_display_name(self) -> None:
         """Guarantee ``api.display_name`` is populated.
 
@@ -157,7 +192,20 @@ class GarminData:
         return str(date)[:10]
 
     def wellness_snapshot(self, date=None) -> dict:
-        """Normalized daily snapshot; any missing metric comes back as None."""
+        """``daily_record`` plus the 7-day resting-HR baseline (extra API calls)."""
+        d = self._d(date)
+        snap = self.daily_record(d)
+        rhr_hist = [row.get("resting_hr") for row in self.history(days=8, end=d)[:-1]]
+        rhr_vals = [v for v in rhr_hist if isinstance(v, (int, float))]
+        snap["resting_hr_7d_avg"] = round(sum(rhr_vals) / len(rhr_vals), 1) if rhr_vals else None
+        return snap
+
+    def daily_record(self, date=None) -> dict:
+        """Normalized single-day record; any missing metric comes back as None.
+
+        All calls are read-only GETs against Garmin Connect. Nothing is written
+        back to the account.
+        """
         api = self._require()
         d = self._d(date)
         snap: dict[str, Any] = {"date": d}
@@ -176,14 +224,24 @@ class GarminData:
         snap["hrv_status"] = status.lower() if isinstance(status, str) else None
 
         bb = _safe(api.get_body_battery, d, d)
-        rows = _dig(bb, 0, "bodyBatteryValuesArray", default=[]) or []
-        levels = [
-            r[2] for r in rows
-            if isinstance(r, list) and len(r) > 2 and isinstance(r[2], (int, float))
+        day0 = bb[0] if isinstance(bb, list) and bb else (bb if isinstance(bb, dict) else {})
+        # The values array columns are self-described; the level is usually at
+        # index 1 ([timestamp, level]) but some payloads add a status column.
+        lvl_idx = 1
+        for item in day0.get("bodyBatteryValueDescriptorDTOList") or []:
+            if isinstance(item, dict) and item.get("bodyBatteryValueDescriptorKey") == "bodyBatteryLevel":
+                lvl_idx = item.get("bodyBatteryValueDescriptorIndex", 1)
+        pairs = [
+            (r[0], r[lvl_idx]) for r in (day0.get("bodyBatteryValuesArray") or [])
+            if isinstance(r, list) and len(r) > lvl_idx and isinstance(r[lvl_idx], (int, float))
         ]
+        pairs.sort(key=lambda p: p[0])
+        levels = [p[1] for p in pairs]
         snap["body_battery_now"] = levels[-1] if levels else None
         snap["body_battery_high"] = max(levels) if levels else None
         snap["body_battery_low"] = min(levels) if levels else None
+        snap["body_battery_charged"] = day0.get("charged")
+        snap["body_battery_drained"] = day0.get("drained")
 
         stress = _safe(api.get_stress_data, d)
         snap["stress_avg"] = _dig(stress, "avgStressLevel")
@@ -201,24 +259,25 @@ class GarminData:
         if isinstance(tr, list) and tr and isinstance(tr[0], dict):
             snap["training_readiness"] = tr[0].get("score")
             snap["training_readiness_level"] = tr[0].get("level")
-            # Garmin reports recoveryTime in minutes on some firmware and hours
-            # on others; anything above a realistic 96h cap is minutes.
-            rec = tr[0].get("recoveryTime")
+            rec = tr[0].get("recoveryTime")  # minutes
             if isinstance(rec, (int, float)):
-                snap["recovery_time_hours"] = round(rec / 60, 1) if rec > 96 else float(rec)
+                snap["recovery_time_hours"] = round(rec / 60, 1)
         else:
             snap["training_readiness"] = None
 
         ts = _safe(api.get_training_status, d)
         dev_map = _dig(ts, "mostRecentTrainingStatus", "latestTrainingStatusData", default={}) or {}
         first = next(iter(dev_map.values()), {}) if isinstance(dev_map, dict) else {}
-        snap["training_status"] = first.get("trainingStatus") if isinstance(first, dict) else None
-        snap["vo2max"] = _dig(ts, "mostRecentVO2Max", "generic", "vo2MaxValue")
-
-        # 7-day resting-HR baseline (for the readiness composite)
-        rhr_hist = [row.get("resting_hr") for row in self.history(days=8, end=d)[:-1]]
-        rhr_vals = [v for v in rhr_hist if isinstance(v, (int, float))]
-        snap["resting_hr_7d_avg"] = round(sum(rhr_vals) / len(rhr_vals), 1) if rhr_vals else None
+        if isinstance(first, dict):
+            snap["training_status"] = _TRAINING_STATUS.get(first.get("trainingStatus"))
+            atl = first.get("acuteTrainingLoadDTO") or {}
+            snap["acwr"] = atl.get("dailyAcuteChronicWorkloadRatio")
+            snap["acute_load"] = atl.get("dailyTrainingLoadAcute")
+            snap["chronic_load"] = atl.get("dailyTrainingLoadChronic")
+        snap["vo2max"] = (
+            _dig(ts, "mostRecentVO2Max", "generic", "vo2MaxValue")
+            or _dig(ts, "mostRecentVO2Max", "generic", "vo2MaxPreciseValue")
+        )
 
         return snap
 

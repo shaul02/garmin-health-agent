@@ -9,3 +9,7 @@ env/
 *.log
 .DS_Store
 .pytest_cache/
+
+# Personal Garmin data export — never commit (repo is public)
+data/
+*.env
