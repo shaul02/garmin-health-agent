@@ -30,6 +30,10 @@ from pathlib import Path
 from dataexport import build_activities_csv, build_wellness_csv
 from garmin_client import GarminData, GarminConnectTooManyRequestsError
 
+# Anchor the default output next to this script, so a scheduled task that runs
+# from any working directory still writes to the project's own data/ folder.
+DEFAULT_OUT = Path(__file__).resolve().parent / "data"
+
 
 def _write_json(path: Path, obj) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -139,7 +143,8 @@ def main(argv=None) -> int:
     ap.add_argument("--days", type=int, default=30, help="how many days of recovery data (default 30)")
     ap.add_argument("--activities", type=int, default=30, help="how many recent workouts (default 30)")
     ap.add_argument("--full", action="store_true", help="re-fetch days already saved")
-    ap.add_argument("--out", default="data", help="output folder (default ./data)")
+    ap.add_argument("--out", default=str(DEFAULT_OUT),
+                    help="output folder (default: the project's data/ folder)")
     args = ap.parse_args(argv)
 
     out = Path(args.out)

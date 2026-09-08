@@ -32,8 +32,10 @@ def _load_secrets() -> dict:
             return _deep_dict(st.secrets)
     except Exception:  # noqa: BLE001
         pass
+    here = pathlib.Path(__file__).resolve().parent
     for p in (
         pathlib.Path(".streamlit/secrets.toml"),
+        here / ".streamlit" / "secrets.toml",
         pathlib.Path.home() / ".streamlit" / "secrets.toml",
     ):
         try:
