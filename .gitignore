@@ -12,4 +12,7 @@ env/
 
 # Personal Garmin data export — never commit (repo is public)
 data/
+plain/
+*.enc
+data-key
 *.env

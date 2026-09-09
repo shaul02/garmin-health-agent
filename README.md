@@ -69,6 +69,32 @@ schtasks /create /tn "GarminHealthSync" /tr "'C:\Users\shust\OneDrive\שולחן
 מריץ את הסנכרון כל בוקר ב-07:00. אחרי ההתחברות הראשונה האסימון תקף לחודשים, אז זה
 רץ לבד. אם פעם ייכשל — הרץ `sync.bat` ידנית פעם אחת כדי לחדש התחברות.
 
+### הצפנה (AES-256)
+
+הפרויקט יושב בתוך OneDrive, כלומר `data/` מסתנכרן לענן. כדי שהעותק הזה יהיה חסר
+ערך בלי המפתח:
+
+```bash
+sync.bat --encrypt
+```
+
+מפעיל **AES-256-GCM**. בהרצה הראשונה נוצר מפתח אקראי חזק ונשמר ב-
+`~/.garmin-health-agent/data-key` — **מחוץ** לתיקיית OneDrive, כך שהעותק המסונכרן
+לא כולל אותו. מרגע זה כל הקבצים נשמרים כ-`<שם>.enc` וכל סנכרון (כולל המתוזמן)
+מצפין אוטומטית.
+
+**גיבוי המפתח:** העתק את `~/.garmin-health-agent/data-key` למקום בטוח. בלעדיו אי
+אפשר לשחזר את הנתונים.
+
+קריאת הנתונים המוצפנים:
+
+```bash
+python datatool.py status              # האם ההצפנה פעילה + מיקום המפתח
+python datatool.py list                # רשימת הקבצים
+python datatool.py cat latest.json     # הדפסת קובץ מפוענח
+python datatool.py export ./plain      # פענוח הכל לתיקייה זמנית
+```
+
 ### מפתח Gemini חינמי (מומלץ)
 
 1. היכנס ל-<https://aistudio.google.com/apikey> וצור מפתח.

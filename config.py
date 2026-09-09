@@ -88,6 +88,47 @@ OLLAMA_MODEL = _get("OLLAMA_MODEL", "llama3.1")
 # ---- analysis knobs ------------------------------------------------------
 SLEEP_TARGET_HOURS = float(_get("SLEEP_TARGET_HOURS", "7.5"))
 
+# ---- local data encryption ---------------------------------------------
+# The passphrase for the AES-256 data export. Kept OUTSIDE the project tree
+# (which lives in OneDrive) so a synced/backed-up copy of data/ is useless
+# without this file. An explicit DATA_PASSPHRASE secret/env var wins if set.
+DATA_KEY_FILE = os.path.expanduser(
+    _get("DATA_KEY_FILE", "~/.garmin-health-agent/data-key")
+)
+
+
+def get_data_passphrase() -> str | None:
+    """Return the data passphrase, or None if encryption isn't set up."""
+    explicit = _get("DATA_PASSPHRASE")
+    if explicit:
+        return explicit
+    try:
+        p = pathlib.Path(DATA_KEY_FILE)
+        if p.is_file():
+            txt = p.read_text(encoding="utf-8").strip()
+            return txt or None
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def ensure_data_passphrase() -> str:
+    """Return the passphrase, generating and saving a strong one on first use."""
+    existing = get_data_passphrase()
+    if existing:
+        return existing
+    import secrets as _secrets_mod
+
+    phrase = _secrets_mod.token_urlsafe(32)
+    p = pathlib.Path(DATA_KEY_FILE)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(phrase + "\n", encoding="utf-8")
+    try:
+        os.chmod(p, 0o600)
+    except OSError:
+        pass
+    return phrase
+
 
 def effective_provider() -> str:
     """The provider we can actually use — falls back to ``rules`` with no key."""
